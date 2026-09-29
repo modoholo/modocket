@@ -12,9 +12,9 @@ from typing import Generator
 import requests
 
 from modocket.https import (
-    DEFAULT_TIMEOUT,
+    download_file,
+    get_page,
     make_us_session,
-    raise_for_rejection,
 )
 
 
@@ -112,19 +112,15 @@ class OhioPowerSitingBoard(object):
         with make_us_session() as session:
             try:
                 params = cls.JSON_PARAMS | {"cmpntid": cls.DEFAULT_CASES_COMPONENT_ID}
-                response = session.get(url, params=params, timeout=DEFAULT_TIMEOUT)
-                response.raise_for_status()
+                response = get_page(url, session, params=params)
 
             except requests.HTTPError as e:
+                # RequestRejected is an HTTPError too, but its block page is a 200
                 if e.response.status_code != 404:
                     raise
                 component_id = cls.discover_cases_cmpntid(session)
                 params = cls.JSON_PARAMS | {"cmpntid": component_id}
-                response = session.get(url, params=params, timeout=DEFAULT_TIMEOUT)
-                response.raise_for_status()
-
-            # The firewall's block page comes back as a 200, so raise_for_status misses it
-            raise_for_rejection(response)
+                response = get_page(url, session, params=params)
 
         return response.json()
 
@@ -168,12 +164,7 @@ class OhioPowerSitingBoard(object):
             If the page doesn't contain ``opsb-cases-main-filter``, or no component ID
             appears before it. Either means the page layout has changed.
         """
-        session = session or make_us_session()
-        response = session.get(cls.BASE_URL + "/cases", timeout=DEFAULT_TIMEOUT)
-        response.raise_for_status()
-        raise_for_rejection(response)
-
-        html = response.text
+        html = get_page(cls.BASE_URL + "/cases", session).text
         try:
             anchor = html.index("opsb-cases-main-filter")
             return cls.COMPONENT_ID_PATTERN.findall(html[:anchor])[-1]
@@ -350,21 +341,7 @@ class OhioPublicUtilityCommission(object):
             If the server takes longer than ``DEFAULT_TIMEOUT`` seconds to respond,
             or to send any one chunk of the file
         """
-        session = session or make_us_session()
-        with session.get(url, timeout=DEFAULT_TIMEOUT, stream=True) as response:
-            response.raise_for_status()
-
-            content_type = response.headers.get("Content-Type", "")
-            if "pdf" not in content_type:
-                raise_for_rejection(response)
-                raise ValueError(f"{url} returned {content_type!r}, not a PDF")
-
-            path = Path(path)
-            with path.open("wb") as file:
-                for chunk in response.iter_content(chunk_size=1024 * 1024):
-                    file.write(chunk)
-
-        return path
+        return download_file(url, path, session, content_type="pdf")
 
     @classmethod
     def get_case_record_page(
@@ -398,13 +375,7 @@ class OhioPublicUtilityCommission(object):
             If the request takes longer than ``DEFAULT_TIMEOUT`` seconds
         """
         url = cls.BASE_URL + "/CaseRecord.aspx?CaseNo=" + case_number
-
-        session = session or make_us_session()
-        response = session.get(url, timeout=DEFAULT_TIMEOUT)
-        response.raise_for_status()
-        raise_for_rejection(response)
-
-        return response
+        return get_page(url, session)
 
     @classmethod
     def get_case_document_ids(
@@ -475,13 +446,7 @@ class OhioPublicUtilityCommission(object):
             If the request takes longer than ``DEFAULT_TIMEOUT`` seconds
         """
         url = cls.BASE_URL + "/DocumentRecord.aspx?DocID=" + document_id
-
-        session = session or make_us_session()
-        response = session.get(url, timeout=DEFAULT_TIMEOUT)
-        response.raise_for_status()
-        raise_for_rejection(response)
-
-        return response
+        return get_page(url, session)
 
     @classmethod
     def get_document_content_ids(
@@ -552,32 +517,3 @@ class OhioPublicUtilityCommission(object):
         for content_id in cls.get_document_content_ids(document_id, session):
             url = cls.BASE_URL + "/ViewImage.aspx?CMID=" + content_id
             yield url
-
-
-if __name__ == "__main__":
-    case_number = "26-0426-el-btx"
-    doc_id = "91e01ff3-bc71-465c-a58d-e1c79ff52802"
-
-    case_number = "26-0746-EL-BGN"
-    root = "ports_energy_center"
-
-    OhioPublicUtilityCommission.download_case_documents(case_number, root)
-
-    raise NotImplementedError("fda")
-
-    for response in OhioPowerSitingBoard.get_cases_list():
-        print(response)
-
-
-    session = make_us_session()
-    for doc_id in OhioPublicUtilityCommission.get_case_document_ids(case_number, session):
-        print(doc_id)
-        for url in OhioPublicUtilityCommission.get_document_urls(doc_id, session):
-            print(f"  {url}")
-            directory = Path(f"case_number={case_number}") / f"doc_id={doc_id}"
-            directory.mkdir(exist_ok=True, parents=True)
-
-            content_id = url.rsplit("CMID=", 1)[1]
-            path = directory / f"{content_id}.pdf"
-            path = OhioPublicUtilityCommission.download_document(url, path, session)
-            print(f"  Saved {path}")

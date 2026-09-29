@@ -1,6 +1,7 @@
 """Common utilities for surfing the web"""
 
 import os
+from pathlib import Path
 import re
 
 import requests
@@ -54,3 +55,104 @@ def raise_for_rejection(response: requests.Response) -> None:
             "the request probably needs to come from a US IP",
             response=response,
         )
+
+
+def get_page(
+    url: str,
+    session: requests.Session | None = None,
+    **kwargs,
+) -> requests.Response:
+    """GET a URL, raising for HTTP errors and firewall block pages
+
+    Parameters
+    ----------
+    url (str)
+        The URL to request
+    session (requests.Session | None)
+        The session to make the request with. Defaults to a new session from
+        ``make_us_session``.
+    **kwargs
+        Passed on to ``session.get``, e.g. ``params``. ``timeout`` defaults to
+        ``DEFAULT_TIMEOUT``.
+
+    Returns
+    -------
+    requests.Response
+        The response, with its body already read
+
+    Raises
+    ------
+    requests.HTTPError
+        If the request fails
+    RequestRejected
+        If a firewall blocks the request. Block pages are often served with a 200,
+        so ``raise_for_status`` alone misses them.
+    requests.Timeout
+        If the request takes longer than the timeout
+    """
+    session = session or make_us_session()
+    kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
+    response = session.get(url, **kwargs)
+    response.raise_for_status()
+    raise_for_rejection(response)
+
+    return response
+
+
+def download_file(
+    url: str,
+    path: str | Path,
+    session: requests.Session | None = None,
+    content_type: str | None = "pdf",
+) -> Path:
+    """Stream the file served at ``url`` to ``path``
+
+    The file is written in chunks, so large filings aren't held in memory.
+
+    Parameters
+    ----------
+    url (str)
+        The URL that serves the file itself
+    path (str | Path)
+        Where to save the file. Its parent directory must already exist, and an
+        existing file at ``path`` is overwritten.
+    session (requests.Session | None)
+        The session to make the request with. Defaults to a new session from
+        ``make_us_session``.
+    content_type (str | None)
+        A substring the response's ``Content-Type`` must contain, e.g. ``"pdf"``.
+        ``None`` accepts any type.
+
+    Returns
+    -------
+    Path
+        ``path``, as a ``Path``
+
+    Raises
+    ------
+    requests.HTTPError
+        If the request fails
+    RequestRejected
+        If a firewall blocks the request, rather than saving its block page
+    ValueError
+        If the ``Content-Type`` doesn't contain ``content_type``. Nothing is
+        written in that case.
+    requests.Timeout
+        If the server takes longer than ``DEFAULT_TIMEOUT`` seconds to respond,
+        or to send any one chunk of the file
+    """
+    session = session or make_us_session()
+    with session.get(url, timeout=DEFAULT_TIMEOUT, stream=True) as response:
+        response.raise_for_status()
+
+        served_type = response.headers.get("Content-Type", "")
+        if content_type is not None and content_type not in served_type:
+            raise_for_rejection(response)
+            raise ValueError(f"{url} returned {served_type!r}, not {content_type!r}")
+
+        path = Path(path)
+        with path.open("wb") as file:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                file.write(chunk)
+
+    return path
